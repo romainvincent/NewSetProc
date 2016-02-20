@@ -1,0 +1,42 @@
+*******
+***General
+**
+-> Finish to clean the code in order for it to be easier to read (+ tab->space).
+-> Divide big files of functions in smaller individual set of correlated functions
+
+
+
+*******
+***cycle_process.py
+**
+-> give the possibility for each one of the statistic representation to select a substet of detection.
+-> while loading : if there is any JSONDecodeErro, discard both trace and retrace an continue loading files
+-> Suppress the double sanity_check when only one file is loaded
+-> Implement a function taking care of the time checking to make the code shorter
+
+
+******
+***plot_i.py
+**
+-> Add more control on tick
+-> imshow map to implement
+-> Improve the control on 2D plot with saving possibilities in png and ps format
+-> Add possibilities of interaction with the plots
+
+*****
+***g_b.py
+**
+-> Implement in Cython a function which return at once min,max,argmin,argmax of an array (half done.. with local minimum..)
+
+
+*****
+***filter.py
+**
+-> Clean somehow the parameters with two different moving average within the filter allowing a faster smoothing of the signal.
+-> Try to implement it in Cython as well
+-> Change name not to overwrite the builtin function
+
+*****
+***json_handling.py
+**
+--> Define more precisely the error type if possible

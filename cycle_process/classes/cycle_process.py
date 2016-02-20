@@ -1,0 +1,676 @@
+import time #to handle the time checking,
+from setproc.common.classes.to_save_object import ToSaveObject
+from setproc.common.classes.open_bin import OpenBin #to be able to open json and bin files
+from setproc.sweep_set.functions.merge_gb import merge_gb
+from setproc.sweep_set.classes.sweep_set import SweepSetOpen #to open and manage sweep_set_open objects
+from setproc.sweep_set.classes.stat_point import StatPoint
+from numpy import size, histogram2d, log10, histogram,zeros, meshgrid
+from numpy import ndarray, sum, array, linspace, float
+from mpl_toolkits.mplot3d import Axes3D
+import mpl_toolkits.mplot3d.axes3d as p3
+from matplotlib.pyplot import figure, title, hist, ginput, plot, scatter, xlabel, ylabel,xlim, ylim,text,tick_params, show
+from math import floor
+from setproc.sweep_set.functions.filter import filter
+from setproc.common.functions.local_extrema import local_extrema
+
+class CycleProcess(ToSaveObject) :
+    """
+    cycle_process can be used to post-process several traces and retraces files. It will merge the traces and retraces between themselves using the merge function. You can save the extracted data so you do not have anymore to open all the sweeps and therefore you gain time and memory.
+    The syntax depends if you have weither or not already extracted data. If it is the case, the syntax is cycle_process("filename"). Otherwise it is cycle_process("trace_filename","retrace_filemane",list of the increment values,and mode (usually "Json")). A sanity_check is performed on each sweep as weel as on the merged ones.
+    
+    """
+
+    def __init__(self, trace, retrace = None , interval = None, mode = "Json"):
+        ToSaveObject.__init__(self)
+        self.filenames_trace = []
+        self.filenames_retrace = []
+
+        if(interval == None and retrace ==None) :
+            temp = OpenBin(trace)
+            for x in temp :
+                self[x] = temp[x]
+            del(temp)
+            self.__PostLoading__()
+
+        else :
+            #TRACE
+            GB_array1 = []
+            #Construct a filename array for loading files
+            for i in interval :
+                self.filenames_trace.append(str(i)+trace)
+
+            #Load the files of the filename array
+            for x in self.filenames_trace :
+                print "Loading ", x, " file. Please wait.."
+                GB_array1.append(SweepSetOpen(x, mode))
+                GB_array1[-1].SanityCheck()
+            print "Merging...."
+            #merge all the GB object in a single one and delete the GB array
+            self.trace = merge_gb(GB_array1)
+            del(GB_array1)
+
+            #RETRACE
+            GB_array2 = []
+            for i in interval :
+                self.filenames_retrace.append(str(i)+retrace)
+
+            for x in self.filenames_retrace :
+                print "Loading ", x, " file. Please wait.."
+                GB_array2.append(SweepSetOpen(x, mode))
+                GB_array2[-1].SanityCheck()
+            print "Merging...."
+            self.retrace = merge_gb(GB_array2)
+            del(GB_array2)
+
+            #Final checking!!
+            print "Finale sanity check once merged"
+            print "trace...."
+            self.trace.SanityCheck()
+            print "retrace..."
+            self.retrace.SanityCheck()
+            self["metadata"] = self.trace["metadata"]
+            del(self.filenames_trace)
+            del(self.filenames_retrace)
+
+    def GetLocalMin(self, i_start, w, span, power = 1, sw =1):
+        """
+        Look global min
+        """
+        self["trace"] = dict([])
+        self["trace"]["local_up"] = []
+        self["trace"]["local_down"] = []
+        self["retrace"] = dict([])
+        self["retrace"]["local_up"] = []
+        self["retrace"]["local_down"] = []
+        sweep_number = max(self.trace["sweep_number"], self.retrace["sweep_number"])
+        for i in range(sweep_number) :
+            if(i%1000 ==0 and i > 0):
+                print(str(int(100 * i/sweep_number)) + "%")
+            up, down = self.trace.GetLocalMin(i, i_start, span, w, power, sw)
+            self["trace"]["local_up"].append(up)
+            self["trace"]["local_down"].append(down)
+
+            up, down = self.retrace.GetLocalMin(i, i_start, span, w, power, sw)
+            self["retrace"]["local_up"].append(up)
+            self["retrace"]["local_down"].append(down)
+
+
+
+    def GetStat(self, i_start, w, power=1, sw=1, mode = "classic", seuil1 = 0, seuil2 = 0, span = 50) :
+        """
+        get_stat allows to detect the jumps going through all the sweeps. It uses directly the function get_jump_2 of the sweep_set_open object. This data are stored independtly from the trace and retrace file. The syntax is the following get_stat(seuil,i_start,w) where seuil is the threshold of detection, i_start is the number of points to skip from zero, and w is the filter widht (see the filter doc for more information).
+        """
+        self.ResetCalibration()
+        if mode == "classic" :
+            self["calibration"]["stat"]["mode"] = mode
+            self["calibration"]["stat"]["w"] = w
+            self["calibration"]["stat"]["sw"] = sw
+            self["calibration"]["stat"]["power"] = power
+            self["calibration"]["stat"]["i_start"] = i_start
+
+        else:
+            self["calibration"]["stat"]["mode"] =  mode
+            self["calibration"]["stat"]["seuil1"] = seuil1
+            self["calibration"]["stat"]["seuil2"] = seuil2
+            self["calibration"]["stat"]["w"] = w
+            self["calibration"]["stat"]["sw"] = sw
+            self["calibration"]["stat"]["power"] = power
+            self["calibration"]["stat"]["i_start"] = i_start
+            self["calibration"]["stat"]["span"] = span
+
+
+        self["detection"] = []
+        sweep_number = max(self.trace["sweep_number"], self.retrace["sweep_number"])
+        si = size(self.trace["bias"])
+
+        for i in range(sweep_number) :
+            if(i%1000 ==0 and i > 0):
+                print(str(int(100 * i/sweep_number)) + "%")
+            #TRACE STAT
+            Down, Up = self.trace.GetJump(i, i_start, w, power, sw, si, mode, seuil1, seuil2, span)
+            Down.trace = True
+            Up.trace = True
+
+            #check what was detected first
+            if( Down.field < Up.field) :
+                self["detection"].append(Down)
+                self["detection"].append(Up)
+            else :
+                self["detection"].append(Up)
+                self["detection"].append(Down)
+
+            #RETRACE STAT
+            Down, Up = self.retrace.GetJump(i, i_start, w, power, sw, si, mode, seuil1, seuil2, span)
+            Down.trace = False
+            Up.trace = False
+            #check what was detected first
+            if( Down.field > Up.field) :
+                self["detection"].append(Down)
+                self["detection"].append(Up)
+            else :
+                self["detection"].append(Up)
+                self["detection"].append(Down)
+
+        return True
+
+
+    def GetHist(self, points,rge = "None", shift_trace=1):
+        seuil1 = self["calibration"]["plot"]["seuil1"]
+        seuil2 = self["calibration"]["plot"]["seuil2"]
+        shift_B = self["calibration"]["plot"]["offset"]
+        trace_range = self["calibration"]["plot"]["range"]
+        if rge == "None" :
+            rge = [trace_range, trace_range]
+        temp = []
+        siup = size(self["detection"])
+        for i in range(siup) :
+            topush = self["detection"][i]
+            if(abs(topush.value) > seuil1 and abs(topush.value) < seuil2) :
+                if (topush.trace == False) :
+                    temp.append(topush.field -shift_B)
+                else :
+                    temp.append(topush.field)
+        siup = size(temp)
+        return histogram2d(temp[:siup-shift_trace], temp[shift_trace:siup], points, rge)
+
+
+
+    def GetAR(self,start = 0, itera=-1) :
+        """
+        This function parse the data and store all the sweep for which there 
+        was a jump both for the trace and retrace. 
+        They are store in ["AvsR"], the first element ["AvsR"][0] being the 
+        trace and the second the retrace.
+        """
+        seuil1 = self["calibration"]["plot"]["seuil1"]
+        seuil2 = self["calibration"]["plot"]["seuil2"]
+        self["AvsR"] = [[], []]
+	if itera==-1:
+           itera = size(self["detection"])/4
+
+        for i in range(start,itera-0) :
+            traceok = False
+            retraceok = False
+            trace1 = self["detection"][4*i+0] #The +4 is due to the fact that the waiting time is done during trace
+            trace2 = self["detection"][4*i+1]
+            retrace1 = self["detection"][4*i+2]
+            retrace2 = self["detection"][4*i+3]
+            #check first which trace has to be taken
+            if(abs(trace1.value) > seuil1 and abs(trace2.value) > seuil1) :
+                if(abs(trace1.value) < seuil2 and abs(trace2.value) < seuil2) :
+                    if abs(trace1.value) > abs(trace2.value) :
+                        trace_push = trace1.field
+                        traceok = True
+                    else :
+                        trace_push = trace2.field
+                        traceok = True
+                elif abs(trace1.value) < seuil2 :
+                    trace_push = trace1.field
+                    traceok = True
+                elif abs(trace2.value) < seuil2 :
+                    trace_push = trace2.field
+                    traceok = True
+            elif abs(trace1.value) > seuil1 and abs(trace1.value) < seuil2 :
+                trace_push = trace1.field
+                traceok = True
+            elif abs(trace2.value) > seuil1 and abs(trace2.value) < seuil2 :
+                trace_push = trace2.field
+                traceok = True
+            if(traceok) :
+                if(abs(retrace1.value) > seuil1 and abs(retrace2.value) > seuil1) :
+                    if(abs(retrace1.value) < seuil2 and abs(retrace2.value) < seuil2) :
+                        if abs(retrace1.value) > abs(retrace2.value) :
+                            retrace_push = retrace1.field
+                            retraceok = True
+                        else :
+                            retrace_push = retrace2.field
+                            retraceok = True
+                    elif abs(retrace1.value) < seuil2 :
+                        retrace_push = retrace1.field
+                        retraceok = True
+                    elif abs(retrace2.value) < seuil2 :
+                        retrace_push = retrace2.field
+                        retraceok = True
+                elif abs(retrace1.value) > seuil1 and abs(retrace1.value) < seuil2 :
+                    retrace_push = retrace1.field
+                    retraceok = True
+                elif abs(retrace2.value) > seuil1 and abs(retrace2.value) < seuil2 :
+                    retrace_push = retrace2.field
+                    retraceok = True
+
+            if(traceok and retraceok):
+                self["AvsR"][0].append(trace_push)
+                self["AvsR"][1].append(retrace_push)
+                
+    def GetRA(self,start = 0, itera=-1) :
+        """
+        This function parse the data and store all the sweep for which there 
+        was a jump both for the trace and retrace. 
+        They are store in ["AvsR"], the first element ["AvsR"][0] being the 
+        trace and the second the retrace.
+        """
+        seuil1 = self["calibration"]["plot"]["seuil1"]
+        seuil2 = self["calibration"]["plot"]["seuil2"]
+        self["RvsA"] = [[], []]
+	if itera==-1:
+           itera = size(self["detection"])/4
+
+        for i in range(start,itera-1) :
+            traceok = False
+            retraceok = False
+            trace1 = self["detection"][4*i+4] #The +4 is due to the fact that the waiting time is done during trace
+            trace2 = self["detection"][4*i+5]
+            retrace1 = self["detection"][4*i+2]
+            retrace2 = self["detection"][4*i+3]
+            #check first which retrace has to be taken
+            if(abs(retrace1.value) > seuil1 and abs(retrace2.value) > seuil1) :
+                if(abs(retrace1.value) < seuil2 and abs(retrace2.value) < seuil2) :
+                    if abs(retrace1.value) > abs(retrace2.value) :
+                        retrace_push = retrace1.field
+                        retraceok = True
+                    else :
+                        retrace_push = retrace2.field
+                        retraceok = True
+                elif abs(retrace1.value) < seuil2 :
+                    retrace_push = retrace1.field
+                    retraceok = True
+                elif abs(retrace2.value) < seuil2 :
+                    retrace_push = retrace2.field
+                    retraceok = True
+            elif abs(retrace1.value) > seuil1 and abs(retrace1.value) < seuil2 :
+                retrace_push = retrace1.field
+                retraceok = True
+            elif abs(retrace2.value) > seuil1 and abs(retrace2.value) < seuil2 :
+                retrace_push = retrace2.field
+                retraceok = True
+            if(retraceok) :
+                if(abs(trace1.value) > seuil1 and abs(trace2.value) > seuil1) :
+                    if(abs(trace1.value) < seuil2 and abs(trace2.value) < seuil2) :
+                        if abs(trace1.value) > abs(trace2.value) :
+                            trace_push = trace1.field
+                            traceok = True
+                        else :
+                            trace_push = trace2.field
+                            traceok = True
+                    elif abs(trace1.value) < seuil2 :
+                        trace_push = trace1.field
+                        traceok = True
+                    elif abs(trace2.value) < seuil2 :
+                        trace_push = trace2.field
+                        traceok = True
+                elif abs(trace1.value) > seuil1 and abs(trace1.value) < seuil2 :
+                    trace_push = trace1.field
+                    traceok = True
+                elif abs(trace2.value) > seuil1 and abs(trace2.value) < seuil2 :
+                    trace_push = trace2.field
+                    traceok = True
+
+            if(traceok and retraceok):
+                self["RvsA"][0].append(trace_push)
+                self["RvsA"][1].append(retrace_push)
+
+
+    def SortData(self) :
+        """
+        This function sort the jumps first according to trace and retrace and then according to the kind of transition, either up or done. For more information on the label up and down, please refer to the documentation of get_jump2.
+        """
+        seuil1 = self["calibration"]["plot"]["seuil1"]
+        seuil2 = self["calibration"]["plot"]["seuil2"]
+
+        self["sort"] = dict()
+        self["sort"]["trace"] = dict()
+        self["sort"]["trace"]["up"] = []
+        self["sort"]["trace"]["down"] = []
+        self["sort"]["retrace"] = dict()
+        self["sort"]["retrace"]["up"] = []
+        self["sort"]["retrace"]["down"] = []
+        for i in range(size(self["detection"])) :
+            topush = self["detection"][i]
+            if topush.trace == True and abs(topush.value) > seuil1 and abs(topush.value) < seuil2 :
+                if topush.up == False :
+                    self["sort"]["trace"]["down"].append(topush.field)
+                else :
+                    self["sort"]["trace"]["up"].append(topush.field)
+
+            if topush.trace == False and abs(topush.value) > seuil1 and abs(topush.value) < seuil2 :
+                if topush.up == False :
+                    self["sort"]["retrace"]["down"].append(topush.field)
+                else :
+                    self["sort"]["retrace"]["up"].append(topush.field)
+
+        return True
+
+    def GetDouble(self, seuil1, seuil2, offset):
+        seuil1 = self["calibration"]["plot"]["seuil1"]
+        seuil2 = self["calibration"]["plot"]["seuil2"]
+        offset = self["calibration"]["plot"]["offset"]
+
+        self["double"] = dict()
+        self["double"]["trace"] = [[], []]
+        self["double"]["retrace"] = [[], []]
+        tot_size = size(self["detection"])
+        itera = int(tot_size/4)
+
+        for i in range(itera) :
+            trace1 = self["detection"][4*i]
+            trace2 = self["detection"][4*i+1]
+            retrace1 = self["detection"][4*i+2]
+            retrace2 = self["detection"][4*i+3]
+            if(abs(trace1.value) > seuil1 and abs(trace2.value) > seuil1) :
+                if(abs(trace1.value) < seuil2 and abs(trace2.value) < seuil2) :
+                    self["double"]["trace"][0].append(trace1.field)
+                    self["double"]["trace"][1].append(trace2.field)
+            if(abs(retrace1.value) > seuil1 and abs(retrace2.value) > seuil1 ):
+                if(abs(retrace1.value) < seuil2 and abs(retrace2.value) < seuil2 ):
+                    self["double"]["retrace"][0].append(retrace1.field)
+                    self["double"]["retrace"][1].append(retrace2.field)
+
+
+    def GetValueStat(self) :
+        self["value_stat"] = [[], []]
+        for i in range(size(self["detection"])) :
+            topush = abs(self["detection"][i].value)
+            towhere = self["detection"][i].trace
+            if(towhere) :
+                if topush > 0 :
+                    self["value_stat"][0].append(topush)
+            else :
+                if topush > 0 :
+                    self["value_stat"][1].append(topush)
+        figure()
+        title("Trace")
+        hist(log10(array(self["value_stat"][0])), 200)
+        figure()
+        title("Retrace")
+        hist(log10(array(self["value_stat"][1])), 200)
+        return True
+
+    def GetSpanSweepNbr(self, seuil1, seuil2):
+
+        seuil1 = self["calibration"]["plot"]["seuil1"]
+        seuil2 = self["calibration"]["plot"]["seuil2"]
+
+
+        self["span_swep_nbr"] = [[], []]
+        tot_size = size(self["detection"])
+        itera = int(tot_size/4)
+        for i in range(itera) :
+            trace1 = self["detection"][4*i]
+            trace2 = self["detection"][4*i+1]
+            retrace1 = self["detection"][4*i+2]
+            retrace2 = self["detection"][4*i+3]
+            addtrace = True
+            addretrace = True
+            if(abs(trace1.value) > seuil1 and abs(trace1.value) < seuil2) :
+                self["span_swep_nbr"][0].append(trace1.sweep_nbr)
+                addtrace = False
+            if(abs(trace2.value) > seuil1 and abs(trace2.value) < seuil2 and addtrace) :
+                self["span_swep_nbr"][0].append(trace2.sweep_nbr)
+            if(abs(retrace1.value) > seuil1 and abs(retrace1.value) < seuil2 ):
+                self["span_swep_nbr"][1].append(retrace1.sweep_nbr)
+                addretrace = False
+            if(abs(retrace2.value) > seuil1 and abs(retrace2.value) < seuil2 and addretrace ):
+                self["span_swep_nbr"][1].append(retrace2.sweep_nbr)
+
+    def GetHysteresis(self) :
+        """
+        This function take for each trace and retrace the value of the magnetic field corresponding at the strongest transistion. This statistic is used afterwards to plot the hysteresis cycle.
+        """
+        self["hysteresis"] = [[], []]
+        tot_size = size(self["detection"])
+        itera = int(tot_size/4)
+        seuil = self["calibration"]["plot"]["seuil1"]
+        for i in range(itera):
+            trace1 = self["detection"][4*i]
+            trace2 = self["detection"][4*i+1]
+            retrace1 = self["detection"][4*i+2]
+            retrace2 = self["detection"][4*i+3]
+            if abs(trace1.value) > abs(trace2.value) and abs(trace1.value) > seuil :
+                self["hysteresis"][0].append(trace1.field)
+            elif abs(trace2.value) > seuil :
+                self["hysteresis"][0].append(trace2.field)
+
+            if abs(retrace1.value) > abs(retrace2.value) and abs(retrace1.value) > seuil :
+                self["hysteresis"][1].append(retrace1.field)
+            elif abs(retrace2.value) > seuil :
+                self["hysteresis"][1].append(retrace2.field)
+    
+    def Get2dPop(self,hist,txt=" ",centers = [-0.04, -0.013, 0.013, 0.04],width = 0.005,rge=[-0.06,0.06],bins=150,colr = "grey"):
+        ax_min =  rge[0]
+        ax_max =  rge[1]
+        steps = (ax_max-ax_min)/bins
+        width_b = int(width/steps)
+        ind_xy = []
+        self["pop2d"] = zeros((size(centers),size(centers)))
+        
+        for ii in range(size(centers)):
+            ind_xy.append(floor((centers[ii] - ax_min)/steps))
+        
+        for kk in range(size(ind_xy)):
+            for ll in range(size(ind_xy)):
+                peak = []
+                for mm in range(2*width_b+1):
+                    y = ind_xy[ll]-width_b+mm
+                    x_min = ind_xy[kk]-width_b
+                    x_max = ind_xy[kk]+width_b+1
+                    peak.append(sum(hist.T[y][x_min:x_max]))
+                
+                self["pop2d"][kk][ll]=sum(peak)
+
+        self["pop2d"]=array(self["pop2d"])/float(sum(sum(array((self["pop2d"])))))
+        fig =figure(figsize = (20,15))
+        ax =  p3.Axes3D(fig,rect=[0.1,0.1,0.8,0.8])       
+        ax.set_xlabel('jump trace / mT',fontsize="xx-large")
+        ax.set_ylabel('jump retrace / mT',fontsize="xx-large")
+        ax.set_zlabel('probability',fontsize="xx-large")	
+        ax.text(0.16,0.08,0,txt,horizontalalignment='center',verticalalignment='center',fontsize="xx-large")
+        ax.tick_params(labelsize="x-large")
+        ax.view_init(45,225)
+        Y,X = meshgrid(array(centers)-width,array(centers)-width)
+        X = X.flatten()
+        Y = Y.flatten()
+        Z = zeros((size(centers),size(centers))).flatten()
+        dx = 2*width
+        dy = 2*width
+        dz = self["pop2d"].flatten()
+        ax.bar3d(X,Y,Z, dx, dy, dz, color=colr)
+        show()
+        return(fig,ax)
+
+
+    def PlotHysteresis(self, xmin, xmax, bins = 200, width = 3, color = ["red","blue"]):
+        self.GetHysteresis()
+        ht = histogram(self['hysteresis'][0], bins, [xmin, xmax])
+        hr = histogram(self['hysteresis'][1], bins, [xmin, xmax])
+        vt = ht[1]
+        vr = hr[1]
+        sum_ht = sum(ht[0])
+        sum_hr = sum(hr[0])
+        norm_val = max(sum_ht, sum_hr)
+        ht = 1.*ht[0]/norm_val
+        hr = 1.*hr[0]/norm_val
+        size_h = size(ht)
+        for i in range(size(ht)) :
+            if i > 0 :
+                ht[i] = ht[i] + ht[i-1]
+                hr[i] = hr[i] + hr[i-1]
+        figure()
+        plot(vt[:size_h], ht * 2 - 1, linewidth = width, color = color[0])
+        plot(vr[:size_h], hr * 2 - 1 + 2.* (norm_val - sum_hr) / norm_val, linewidth = width, color = color[1])
+        xlim(xmin, xmax)
+        ylim(-1.05, 1.05)
+        xlabel("B (T)")
+        ylabel(r"$M/M_s$")
+        return [vt[:size_h], ht * 2 - 1, vr[:size_h], hr * 2 - 1 + 2.* (norm_val - sum_hr) / norm_val]
+
+
+    def GetTimeStat(self, mode = "retrace-trace") :
+        sweep_nbr = size(self["dates"][0])
+        if mode == "trace-retrace" :
+            result = []
+            for i in range(sweep_nbr):
+                DT = self["dates"][0][i]
+                DR = self["dates"][1][i]
+                Tt = time.strptime(DT,"%Y-%m-%dT%H:%M:%S")
+                Tr = time.strptime(DR,"%Y-%m-%dT%H:%M:%S")
+                tt = time.mktime(Tt)
+                tr = time.mktime(Tr)
+                result.append(tr-tt)
+
+        elif mode == "retrace-trace" :
+            result = []
+            for i in range(sweep_nbr-1):
+                DT = self["dates"][0][i+1]
+                DR = self["dates"][1][i]
+                Tt = time.strptime(DT,"%Y-%m-%dT%H:%M:%S")
+                Tr = time.strptime(DR,"%Y-%m-%dT%H:%M:%S")
+                tt = time.mktime(Tt)
+                tr = time.mktime(Tr)
+                result.append(tr-tt)
+
+        elif mode == "trace-trace" :
+            result = []
+            for i in range(sweep_nbr-1):
+                DT = self["dates"][0][i+1]
+                DR = self["dates"][0][i]
+                Tt = time.strptime(DT,"%Y-%m-%dT%H:%M:%S")
+                Tr = time.strptime(DR,"%Y-%m-%dT%H:%M:%S")
+                tt = time.mktime(Tt)
+                tr = time.mktime(Tr)
+                result.append(tr-tt)
+
+        elif mode == "retrace-retrace" :
+            result = []
+            for i in range(sweep_nbr-1):
+                DT = self["dates"][1][i+1]
+                DR = self["dates"][1][i]
+                Tt = time.strptime(DT,"%Y-%m-%dT%H:%M:%S")
+                Tr = time.strptime(DR,"%Y-%m-%dT%H:%M:%S")
+                tt = time.mktime(Tt)
+                tr = time.mktime(Tr)
+                result.append(tr-tt)
+
+        return hist(result, 25)
+
+    def SetPlotCalibration(self, args = "None"):
+        if args == "None":
+            print("to be done")
+        else :
+            self["calibration"]["plot"]["seuil1"] = args[0]
+            self["calibration"]["plot"]["seuil2"] = args[1]
+            self["calibration"]["plot"]["range"] = args[2]
+            self["calibration"]["plot"]["offset"] = args[3]
+
+    def ResetCalibration(self):
+        self["calibration"] = dict()
+        #parameters used for stat
+        self["calibration"]["stat"] = dict()
+        self["calibration"]["stat"]["seuil1"] = "None"
+        self["calibration"]["stat"]["seuil2"] = "None"
+        self["calibration"]["stat"]["w"] = "None"
+        self["calibration"]["stat"]["sw"] = "None"
+        self["calibration"]["stat"]["power"] = "None"
+        self["calibration"]["stat"]["i_start"] = "None"
+        #parameter used for plotting
+        self["calibration"]["plot"] = dict()
+        self["calibration"]["plot"]["seuil1"] = "None"
+        self["calibration"]["plot"]["seuil1"] = "None"
+        self["calibration"]["plot"]["range"] = "None"
+        self["calibration"]["plot"]["offset"] = "None"
+
+    def CalibrateOffset(self, kind1 = "up", kind2 = "down"):
+        print("Select the trace then the retrace")
+        rge = self["calibration"]["plot"]["range"]
+        figure()
+        hist(self["sort"]["trace"][kind1], 100, rge)
+        hist(self["sort"]["retrace"][kind2], 100, rge)
+        temp = ginput(2)
+        self["calibration"]["plot"]["offset"] = temp[1][0] - temp[0][0]
+
+    ###This part contains the functions allowing some interaction with the object through menu
+    ###
+
+    def Menu(self) :
+        print("Make your choice")
+        print("1 ----> Extract statistique")
+
+        #if choice == 1 :
+        #    self.menu_stat(self)
+
+        return True
+
+
+    def MenuStat(self):
+        print("Let's proceed to the statistic extraction")
+        print("Choose the mode : ")
+        print("  1 ----> Classic")
+        print("  2 ----> Double threshold")
+        return True
+
+
+
+
+    ########################################################
+    ###This part is dedicated to saving and loading the data
+    ###
+
+    def SaveAll(self, tracefile, retracefile, whole_experiment) :
+        """
+        This function allows to save the data in binary format. This make them faster to load. The syntax is as follow : save_all(filename_for_trace,filename_for_retrace,filename_for_data_extracted)
+        """
+        self.trace.Savez(tracefile)
+        self.retrace.Savez(retracefile)
+        self["filenames"] = [tracefile+".npz", retracefile+".npz"]
+        self.__ReadyToSave__()
+        self.Save(whole_experiment)
+        self.__PostLoading__()
+
+
+    def LoadSweeps(self, mode="npz") :
+        """
+        to be documented latter
+        """
+        self.trace = SweepSetOpen(self["filenames"][0], mode)
+        self.retrace = SweepSetOpen(self["filenames"][1], mode)
+        print ("Sanity checks")
+        print ("* Trace")
+        self.trace.SanityCheck()
+        print ("* Retrace")
+        self.retrace.SanityCheck()
+
+    def LoadDates(self):
+        self["dates"] = [[], []]
+        sweep_number = max(self.trace["sweep_number"], self.retrace["sweep_number"])
+        for i in range(sweep_number) :
+            self["dates"][0].append(self.trace["date"][i])
+            self["dates"][1].append(self.retrace["date"][i])
+
+
+    def __ReadyToSave__(self) :
+        i = 0
+        for x in self["detection"]  :
+            self["detection"][i ] = x.PassArray()
+            i = i+1
+
+    def __PostLoading__(self) :
+        for i in range(len(self["detection"])) :
+            self["detection"][i] = StatPoint(self["detection"][i])
+
+    def Reset(self) :
+        todelete = self.keys()
+        for x in todelete :
+            if x == "metadata" or x == "filenames" :
+                continue
+            else :
+                self.pop(x)
+
+if __name__ == '__main__':
+    sys.path.append("/home/stefan/1PhD/")
+    from setproc.cycle_process.classes.cycle_process import CycleProcess
+    import os
+    os.chdir("/home/stefan/1PhD/EMig/Diluette/14R/IndTransII/")    
+    cyc = CycleProcess('Stat.bin')
+    cyc.LoadSweeps() 
+    #temp_array = array(cyc.trace["data"][0][150:], dtype = float)
+    #figure(); plot(cyc.trace["bias"][150:],temp_array);
+    cyc.trace.GetPeakScatter(150,4,1,17,50,1e-28,0,[-0.4,0.4],[-0.4,0.4],"Bt / T","B||/T")
